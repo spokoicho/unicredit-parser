@@ -1,138 +1,94 @@
-# unicredit_parser.py
-
 import re
+import pandas as pd
 from pdfminer.high_level import extract_text
 
 
-# ---------------------------------------------------------
-# 1) Extract text from PDF
-# ---------------------------------------------------------
 def extract_unicredit_text(pdf_bytes: bytes) -> str:
+    """Extract text from UniCredit PDF using pdfminer."""
     temp_path = "unicredit_temp.pdf"
     with open(temp_path, "wb") as f:
         f.write(pdf_bytes)
-
-    try:
-        text = extract_text(temp_path)
-    except Exception as e:
-        return f"[Грешка при извличане]: {e}"
-
-    return text
+    return extract_text(temp_path)
 
 
-# ---------------------------------------------------------
-# 2) Parse UniCredit transactions
-# ---------------------------------------------------------
 def parse_unicredit_transactions(text: str):
     """
-    Parse the UniCredit 'Платежни операции' table from extracted text.
-    Returns a list of dicts with structured transaction data.
+    Parse UniCredit PDF text extracted by pdfminer.
+    Works with the block-structured format (dates block, descriptions block, types block, EUR block, trx block).
+    Returns list of dicts with: date, description, type, eur, transaction_id.
     """
 
-    # Normalize whitespace
     lines = [l.strip() for l in text.split("\n") if l.strip()]
 
-    # Find start of the table
-    start_idx = None
-    for i, line in enumerate(lines):
-        if "Платежни операции" in line or "Payment transactions" in line:
-            start_idx = i
-            break
+    # -----------------------------
+    # 1) Extract dates (always pairs)
+    # -----------------------------
+    date_pattern = r"^\d{2}\.\d{2}\.\d{4}$"
+    dates = [l for l in lines if re.match(date_pattern, l)]
 
-    if start_idx is None:
-        return []
+    # Keep only the first date of each pair (date / value date)
+    dates = dates[::2]
 
-    # Extract only the table part
-    table_lines = lines[start_idx + 1 :]
+    # -----------------------------
+    # 2) Extract types (ДТ/КТ)
+    # -----------------------------
+    types = []
+    for l in lines:
+        if l in ("ДТ", "DT", "КТ", "CT"):
+            types.append(l)
 
-    # Stop when next section begins
-    stop_keywords = [
-        "Извлечението е автоматично генерирано",
-        "Важно за Вашето обслужване",
-        "Your deposits in UniCredit",
-    ]
+    # -----------------------------
+    # 3) Extract EUR amounts
+    # -----------------------------
+    eur_pattern = r"^\d{1,3}(?:[\.,]\d{3})*[\.,]\d{2}$"
+    eur_values = [l.replace(",", "") for l in lines if re.match(eur_pattern, l)]
 
-    cleaned = []
-    for line in table_lines:
-        if any(k in line for k in stop_keywords):
-            break
-        cleaned.append(line)
+    # -----------------------------
+    # 4) Extract transaction IDs
+    # -----------------------------
+    trx_pattern = r"^[A-Za-z0-9]{10,}$"
+    trx_ids = [l for l in lines if re.match(trx_pattern, l)]
 
-    # Remove header rows
-    cleaned = [
-        l for l in cleaned
-        if not ("Дата" in l or "Description" in l or "Type" in l or "EUR" in l)
-    ]
+    # -----------------------------
+    # 5) Extract descriptions
+    # Descriptions are between date blocks and type blocks.
+    # -----------------------------
+    descriptions = []
+    current_desc = []
 
-    # ---------------------------------------------------------
-    # 3) Parse rows
-    # ---------------------------------------------------------
-    transactions = []
-    buffer = None  # holds first row of 2-row transaction
+    for l in lines:
+        if re.match(date_pattern, l):
+            if current_desc:
+                descriptions.append(" ".join(current_desc))
+                current_desc = []
+            continue
 
-    date_regex = r"^\d{2}\.\d{2}\.\d{4}"
-    eur_regex = r"(\d{1,3}(?:[\.,]\d{3})*[\.,]\d{2})$"
+        if l in ("ДТ", "DT", "КТ", "CT"):
+            if current_desc:
+                descriptions.append(" ".join(current_desc))
+                current_desc = []
+            continue
 
-    for line in cleaned:
-        # Detect start of a new transaction row
-        if re.match(date_regex, line):
-            # If previous buffer exists → save it
-            if buffer:
-                transactions.append(buffer)
-                buffer = None
+        # Description lines start with "-"
+        if l.startswith("-"):
+            current_desc.append(l)
 
-            parts = line.split()
-            date = parts[0]
-            # Remove date and value date
-            rest = " ".join(parts[2:])
+    if current_desc:
+        descriptions.append(" ".join(current_desc))
 
-            # Extract EUR amount
-            eur_match = re.search(eur_regex, rest)
-            eur = eur_match.group(1).replace(",", "") if eur_match else ""
+    # -----------------------------
+    # Align all lists by index
+    # -----------------------------
+    n = min(len(dates), len(descriptions), len(types), len(eur_values), len(trx_ids))
 
-            # Remove EUR from description
-            if eur:
-                rest = rest[: rest.rfind(eur)].strip()
+    result = []
+    for i in range(n):
+        result.append({
+            "date": dates[i],
+            "description": descriptions[i],
+            "type": types[i],
+            "eur": eur_values[i],
+            "transaction_id": trx_ids[i]
+        })
 
-            # Extract transaction number (last token if alphanumeric)
-            tokens = rest.split()
-            
-            # Ако няма токени → няма transaction_id
-            if not tokens:
-                trx = ""
-            else:
-                last = tokens[-1]
-                trx = last if re.match(r"^[A-Za-z0-9]+$", last) else ""
-                if trx:
-                    tokens = tokens[:-1]  # махаме го от описанието
-            
-            rest = " ".join(tokens)
-            if trx:
-                rest = " ".join(tokens[:-1])
-
-            # Extract type (DT/CT)
-            type_match = re.search(r"\b(ДТ|КТ|DT|CT)\b", rest)
-            op_type = type_match.group(1) if type_match else ""
-
-            # Remove type from description
-            if op_type:
-                rest = rest.replace(op_type, "").strip()
-
-            buffer = {
-                "date": date,
-                "description": rest,
-                "type": op_type,
-                "eur": eur,
-                "transaction_id": trx,
-            }
-
-        else:
-            # This is second row of a 2-row transaction → append to description
-            if buffer:
-                buffer["description"] += " " + line.strip()
-
-    # Add last buffered transaction
-    if buffer:
-        transactions.append(buffer)
-
-    return transactions
+    return result
