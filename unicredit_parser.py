@@ -3,6 +3,9 @@ import pandas as pd
 from pdfminer.high_level import extract_text
 
 
+# ---------------------------------------------------------
+# Extract text from PDF
+# ---------------------------------------------------------
 def extract_unicredit_text(pdf_bytes: bytes) -> str:
     temp_path = "unicredit_temp.pdf"
     with open(temp_path, "wb") as f:
@@ -10,11 +13,14 @@ def extract_unicredit_text(pdf_bytes: bytes) -> str:
     return extract_text(temp_path)
 
 
+# ---------------------------------------------------------
+# Main UniCredit parser
+# ---------------------------------------------------------
 def parse_unicredit_transactions(text: str):
     lines = [l.strip() for l in text.split("\n") if l.strip()]
 
     # -----------------------------
-    # 1) Extract dates (first of each pair)
+    # 1) Extract all dates
     # -----------------------------
     date_pattern = r"^\d{2}\.\d{2}\.\d{4}$"
     all_dates = [l for l in lines if re.match(date_pattern, l)]
@@ -38,7 +44,7 @@ def parse_unicredit_transactions(text: str):
     trx_ids = [l for l in lines if re.match(trx_pattern, l)]
 
     # -----------------------------
-    # 5) Extract descriptions
+    # 5) Extract descriptions (all "-" blocks)
     # -----------------------------
     descriptions = []
     current = []
@@ -57,7 +63,45 @@ def parse_unicredit_transactions(text: str):
         descriptions.append(" ".join(current))
 
     # -----------------------------
-    # 6) Align by index
+    # 6) Extract counterparty
+    # Two formats:
+    #   A) IBAN / Контрагент / ф-ра
+    #   B) "Контрагент :" + next lines
+    # -----------------------------
+    counterparties = []
+
+    for desc in descriptions:
+        # Format B: "Контрагент :"
+        m = re.search(r"Контрагент\s*:\s*(.+)", desc)
+        if m:
+            name = m.group(1).strip()
+            # remove trailing numbers (client IDs)
+            name = re.sub(r"\s+\d{6,}$", "", name)
+            counterparties.append(name)
+            continue
+
+        # Format A: IBAN / NAME / ф-ра
+        m = re.search(r"/\s*([^/]+?)\s*(ф-ра|$)", desc)
+        if m:
+            name = m.group(1).strip()
+            counterparties.append(name)
+            continue
+
+        counterparties.append("")
+
+    # -----------------------------
+    # 7) Extract basis (ф-ра <номер>)
+    # -----------------------------
+    basis_list = []
+    for desc in descriptions:
+        m = re.search(r"ф-ра\s*([A-Za-z0-9]+)", desc)
+        if m:
+            basis_list.append(f"ф-ра {m.group(1)}")
+        else:
+            basis_list.append("")
+
+    # -----------------------------
+    # 8) Align all lists by index
     # -----------------------------
     n = min(len(dates), len(descriptions), len(types), len(eur_values), len(trx_ids))
 
@@ -65,6 +109,8 @@ def parse_unicredit_transactions(text: str):
     for i in range(n):
         result.append({
             "date": dates[i],
+            "counterparty": counterparties[i],
+            "basis": basis_list[i],
             "description": descriptions[i],
             "type": types[i],
             "eur": eur_values[i],
