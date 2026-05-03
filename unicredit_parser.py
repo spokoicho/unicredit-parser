@@ -96,7 +96,17 @@ def parse_unicredit_transactions(text: str):
 
             # Extract transaction number (last token if alphanumeric)
             tokens = rest.split()
-            trx = tokens[-1] if re.match(r"[A-Za-z0-9]+", tokens[-1]) else ""
+            
+            # Ако няма токени → няма transaction_id
+            if not tokens:
+                trx = ""
+            else:
+                last = tokens[-1]
+                trx = last if re.match(r"^[A-Za-z0-9]+$", last) else ""
+                if trx:
+                    tokens = tokens[:-1]  # махаме го от описанието
+            
+            rest = " ".join(tokens)
             if trx:
                 rest = " ".join(tokens[:-1])
 
