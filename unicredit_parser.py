@@ -4,7 +4,6 @@ from pdfminer.high_level import extract_text
 
 
 def extract_unicredit_text(pdf_bytes: bytes) -> str:
-    """Extract text from UniCredit PDF using pdfminer."""
     temp_path = "unicredit_temp.pdf"
     with open(temp_path, "wb") as f:
         f.write(pdf_bytes)
@@ -12,30 +11,19 @@ def extract_unicredit_text(pdf_bytes: bytes) -> str:
 
 
 def parse_unicredit_transactions(text: str):
-    """
-    Parse UniCredit PDF text extracted by pdfminer.
-    Works with the block-structured format (dates block, descriptions block, types block, EUR block, trx block).
-    Returns list of dicts with: date, description, type, eur, transaction_id.
-    """
-
     lines = [l.strip() for l in text.split("\n") if l.strip()]
 
     # -----------------------------
-    # 1) Extract dates (always pairs)
+    # 1) Extract dates (first of each pair)
     # -----------------------------
     date_pattern = r"^\d{2}\.\d{2}\.\d{4}$"
-    dates = [l for l in lines if re.match(date_pattern, l)]
-
-    # Keep only the first date of each pair (date / value date)
-    dates = dates[::2]
+    all_dates = [l for l in lines if re.match(date_pattern, l)]
+    dates = all_dates[::2]  # keep only the first of each pair
 
     # -----------------------------
     # 2) Extract types (ДТ/КТ)
     # -----------------------------
-    types = []
-    for l in lines:
-        if l in ("ДТ", "DT", "КТ", "CT"):
-            types.append(l)
+    types = [l for l in lines if l in ("ДТ", "DT", "КТ", "CT")]
 
     # -----------------------------
     # 3) Extract EUR amounts
@@ -51,33 +39,25 @@ def parse_unicredit_transactions(text: str):
 
     # -----------------------------
     # 5) Extract descriptions
-    # Descriptions are between date blocks and type blocks.
     # -----------------------------
     descriptions = []
-    current_desc = []
+    current = []
 
     for l in lines:
-        if re.match(date_pattern, l):
-            if current_desc:
-                descriptions.append(" ".join(current_desc))
-                current_desc = []
+        if re.match(date_pattern, l) or l in ("ДТ", "DT", "КТ", "CT"):
+            if current:
+                descriptions.append(" ".join(current))
+                current = []
             continue
 
-        if l in ("ДТ", "DT", "КТ", "CT"):
-            if current_desc:
-                descriptions.append(" ".join(current_desc))
-                current_desc = []
-            continue
-
-        # Description lines start with "-"
         if l.startswith("-"):
-            current_desc.append(l)
+            current.append(l)
 
-    if current_desc:
-        descriptions.append(" ".join(current_desc))
+    if current:
+        descriptions.append(" ".join(current))
 
     # -----------------------------
-    # Align all lists by index
+    # 6) Align by index
     # -----------------------------
     n = min(len(dates), len(descriptions), len(types), len(eur_values), len(trx_ids))
 
