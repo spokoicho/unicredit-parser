@@ -44,20 +44,20 @@ def parse_unicredit_transactions(text: str):
     trx_ids = [l for l in lines if re.match(trx_pattern, l)]
 
     # -----------------------------
-    # 5) Extract descriptions (all "-" blocks)
+    # 5) Extract descriptions (split by "-")
     # -----------------------------
     descriptions = []
     current = []
 
     for l in lines:
-        if re.match(date_pattern, l) or l in ("ДТ", "DT", "КТ", "CT"):
+        if l.startswith("-"):
             if current:
                 descriptions.append(" ".join(current))
                 current = []
-            continue
-
-        if l.startswith("-"):
             current.append(l)
+        else:
+            if current:
+                current.append(l)
 
     if current:
         descriptions.append(" ".join(current))
@@ -72,11 +72,10 @@ def parse_unicredit_transactions(text: str):
 
     for desc in descriptions:
         # Format B: "Контрагент :"
-        m = re.search(r"Контрагент\s*:\s*(.+)", desc)
+        m = re.search(r"Контрагент\s*:\s*([A-Za-zА-Яа-я0-9\s]+)", desc)
         if m:
             name = m.group(1).strip()
-            # remove trailing numbers (client IDs)
-            name = re.sub(r"\s+\d{6,}$", "", name)
+            name = re.sub(r"\s+\d{6,}$", "", name)  # remove trailing IDs
             counterparties.append(name)
             continue
 
