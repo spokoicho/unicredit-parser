@@ -1,6 +1,10 @@
 import streamlit as st
+import re
 import pandas as pd
-from unicredit_parser import extract_unicredit_text, parse_unicredit_transactions
+from io import BytesIO
+from pdfminer.high_level import extract_text
+from pdfminer.layout import LAParams  # <--- ТОВА ЛИПСВАШЕ
+from datetime import datetime
 
 st.title("UniCredit PDF Parser")
 
