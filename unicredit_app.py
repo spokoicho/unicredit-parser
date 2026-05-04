@@ -1,61 +1,23 @@
-from pdfminer.high_level import extract_pages
-from pdfminer.layout import LTTextBoxHorizontal, LTTextLineHorizontal
-import re
+import streamlit as st
+import pandas as pd
+from unicredit_parser import parse_unicredit
 
+st.set_page_config(page_title="UniCredit PDF Parser", layout="wide")
 
-def extract_layout_rows(pdf_bytes):
-    """
-    Връща списък от редове, където всеки ред е списък от клетки:
-    [
-        {"text": "...", "x0": ..., "y0": ..., "x1": ..., "y1": ...},
-        ...
-    ]
-    """
+st.title("UniCredit PDF Parser")
 
-    temp_path = "unicredit_temp.pdf"
-    with open(temp_path, "wb") as f:
-        f.write(pdf_bytes)
+uploaded = st.file_uploader("Качи UniCredit PDF", type=["pdf"])
 
-    elements = []
+if uploaded:
+    pdf_bytes = uploaded.read()
 
-    for page_layout in extract_pages(temp_path):
-        for element in page_layout:
-            if isinstance(element, (LTTextBoxHorizontal, LTTextLineHorizontal)):
-                text = element.get_text().strip()
-                if text:
-                    elements.append({
-                        "text": text,
-                        "x0": element.x0,
-                        "y0": element.y0,
-                        "x1": element.x1,
-                        "y1": element.y1
-                    })
+    with st.spinner("Обработка на PDF..."):
+        operations = parse_unicredit(pdf_bytes)
 
-    # групиране по редове чрез y0
-    rows = []
-    current_row = []
-    last_y = None
-    tolerance = 3
+    df = pd.DataFrame(operations)
 
-    for el in sorted(elements, key=lambda e: -e["y0"]):
-        if last_y is None:
-            current_row = [el]
-            last_y = el["y0"]
-            continue
+    st.subheader("Извлечени операции")
+    st.dataframe(df, use_container_width=True)
 
-        if abs(el["y0"] - last_y) <= tolerance:
-            current_row.append(el)
-        else:
-            rows.append(current_row)
-            current_row = [el]
-            last_y = el["y0"]
-
-    if current_row:
-        rows.append(current_row)
-
-    # сортиране по x0 вътре в реда
-    sorted_rows = []
-    for row in rows:
-        sorted_rows.append(sorted(row, key=lambda e: e["x0"]))
-
-    return sorted_rows
+    csv = df.to_csv(index=False).encode("utf-8")
+    st.download_button("Свали CSV", csv, "unicredit_export.csv", "text/csv")
