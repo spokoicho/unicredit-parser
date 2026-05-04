@@ -1,119 +1,108 @@
 import re
-import pandas as pd
-from pdfminer.high_level import extract_text
+from unicredit_layout import extract_layout_rows
 
 
-# ---------------------------------------------------------
-# Extract text from PDF
-# ---------------------------------------------------------
-def extract_unicredit_text(pdf_bytes: bytes) -> str:
-    temp_path = "unicredit_temp.pdf"
-    with open(temp_path, "wb") as f:
-        f.write(pdf_bytes)
-    return extract_text(temp_path)
+DATE_RE = re.compile(r"^\d{2}\.\d{2}\.\d{4}")
+EUR_RE = re.compile(r"^\d{1,3}(?:[.,]\d{3})*[.,]\d{2}$")
+ID_RE = re.compile(r"^[A-Za-z0-9]{10,}$")
+TYPE_RE = re.compile(r"^(ДТ|КТ|DT|CT)$")
 
 
-# ---------------------------------------------------------
-# Main UniCredit parser
-# ---------------------------------------------------------
-def parse_unicredit_transactions(text: str):
-    lines = [l.strip() for l in text.split("\n") if l.strip()]
+def clean_date(cell):
+    if "/" in cell:
+        return cell.split("/")[0].strip()
+    return cell.strip()
 
-    # -----------------------------
-    # 1) Extract all dates
-    # -----------------------------
-    date_pattern = r"^\d{2}\.\d{2}\.\d{4}$"
-    all_dates = [l for l in lines if re.match(date_pattern, l)]
-    dates = all_dates[::2]  # keep only the first of each pair
 
-    # -----------------------------
-    # 2) Extract types (ДТ/КТ)
-    # -----------------------------
-    types = [l for l in lines if l in ("ДТ", "DT", "КТ", "CT")]
+def extract_counterparty(description):
+    # ATM → контрагент = UniCredit Bulbank
+    if "АТМ" in description or "ATM" in description:
+        return "UniCredit Bulbank"
 
-    # -----------------------------
-    # 3) Extract EUR amounts
-    # -----------------------------
-    eur_pattern = r"^\d{1,3}(?:[\.,]\d{3})*[\.,]\d{2}$"
-    eur_values = [l.replace(",", "") for l in lines if re.match(eur_pattern, l)]
+    # Контрагент : ИМЕ
+    m = re.search(r"Контрагент\s*:\s*([A-Za-zА-Яа-я0-9\s\.\-]+)", description)
+    if m:
+        return m.group(1).strip()
 
-    # -----------------------------
-    # 4) Extract transaction IDs
-    # -----------------------------
-    trx_pattern = r"^[A-Za-z0-9]{10,}$"
-    trx_ids = [l for l in lines if re.match(trx_pattern, l)]
+    # IBAN / ИМЕ / ф-ра
+    m = re.search(r"/\s*([^/]+?)\s*(ф-ра|$)", description)
+    if m:
+        return m.group(1).strip()
 
-    # -----------------------------
-    # 5) Extract descriptions (split by "-")
-    # -----------------------------
-    descriptions = []
-    current = []
+    return ""
 
-    for l in lines:
-        if l.startswith("-"):
-            if current:
-                descriptions.append(" ".join(current))
-                current = []
-            current.append(l)
-        else:
-            if current:
-                current.append(l)
 
-    if current:
-        descriptions.append(" ".join(current))
+def extract_basis(description):
+    # ATM
+    if "АТМ" in description or "ATM" in description:
+        return "Теглене АТМ"
 
-    # -----------------------------
-    # 6) Extract counterparty
-    # Two formats:
-    #   A) IBAN / Контрагент / ф-ра
-    #   B) "Контрагент :" + next lines
-    # -----------------------------
-    counterparties = []
+    # ф-ра <номер>
+    m = re.search(r"ф-ра\s*([A-Za-z0-9]+)", description)
+    if m:
+        return f"ф-ра {m.group(1)}"
 
-    for desc in descriptions:
-        # Format B: "Контрагент :"
-        m = re.search(r"Контрагент\s*:\s*([A-Za-zА-Яа-я0-9\s]+)", desc)
-        if m:
-            name = m.group(1).strip()
-            name = re.sub(r"\s+\d{6,}$", "", name)  # remove trailing IDs
-            counterparties.append(name)
+    return ""
+
+
+def parse_unicredit(pdf_bytes):
+    rows = extract_layout_rows(pdf_bytes)
+
+    operations = []
+    current = {
+        "date": "",
+        "description": "",
+        "type": "",
+        "eur": "",
+        "transaction_id": ""
+    }
+
+    for row in rows:
+        texts = [c["text"] for c in row]
+
+        # 1) Дата → начало на нова операция
+        if DATE_RE.match(texts[0]):
+            # ако има текуща операция → записваме я
+            if current["date"]:
+                operations.append(current)
+
+            current = {
+                "date": clean_date(texts[0]),
+                "description": "",
+                "type": "",
+                "eur": "",
+                "transaction_id": ""
+            }
             continue
 
-        # Format A: IBAN / NAME / ф-ра
-        m = re.search(r"/\s*([^/]+?)\s*(ф-ра|$)", desc)
-        if m:
-            name = m.group(1).strip()
-            counterparties.append(name)
+        # 2) Описание (винаги започва с "-")
+        if texts[0].startswith("-"):
+            current["description"] += " " + " ".join(texts)
             continue
 
-        counterparties.append("")
+        # 3) Тип
+        for t in texts:
+            if TYPE_RE.match(t):
+                current["type"] = t
 
-    # -----------------------------
-    # 7) Extract basis (ф-ра <номер>)
-    # -----------------------------
-    basis_list = []
-    for desc in descriptions:
-        m = re.search(r"ф-ра\s*([A-Za-z0-9]+)", desc)
-        if m:
-            basis_list.append(f"ф-ра {m.group(1)}")
-        else:
-            basis_list.append("")
+        # 4) EUR
+        for t in texts:
+            if EUR_RE.match(t.replace(",", "")):
+                current["eur"] = t.replace(",", "")
 
-    # -----------------------------
-    # 8) Align all lists by index
-    # -----------------------------
-    n = min(len(dates), len(descriptions), len(types), len(eur_values), len(trx_ids))
+        # 5) Transaction ID
+        for t in texts:
+            if ID_RE.match(t):
+                current["transaction_id"] = t
 
-    result = []
-    for i in range(n):
-        result.append({
-            "date": dates[i],
-            "counterparty": counterparties[i],
-            "basis": basis_list[i],
-            "description": descriptions[i],
-            "type": types[i],
-            "eur": eur_values[i],
-            "transaction_id": trx_ids[i]
-        })
+    # последната операция
+    if current["date"]:
+        operations.append(current)
 
-    return result
+    # извличане на контрагент и основание
+    for op in operations:
+        op["description"] = op["description"].strip()
+        op["counterparty"] = extract_counterparty(op["description"])
+        op["basis"] = extract_basis(op["description"])
+
+    return operations
